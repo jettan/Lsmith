@@ -1,3 +1,5 @@
+#!/usr/bin/env bash
+
 # python3 executable
 if [[ -z "${python_cmd}" ]]
 then

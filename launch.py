@@ -125,7 +125,7 @@ def install_tensorrt(tensorrt_linux_command: str):
 def prepare_environment(args: List[str]):
     torch_command = os.environ.get(
         "TORCH_COMMAND",
-        "pip install torch==1.12.0+cu116 --extra-index-url https://download.pytorch.org/whl/cu116",
+        "pip install torch --extra-index-url https://download.pytorch.org/whl/cu118",
     )
     tensorrt_linux_command = os.environ.get(
         "TENSORRT_LINUX_COMMAND",

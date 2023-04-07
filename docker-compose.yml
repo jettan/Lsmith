@@ -7,10 +7,10 @@ services:
     ports:
       - 8000:8000
     volumes:
-      - ./docker-data/models:/app/models
-      - ./docker-data/outputs:/app/outputs
+      - ./models:/app/models
+      - ./outputs:/app/outputs
     environment:
-      - COMMANDLINE_ARGS=
+      - COMMANDLINE_ARGS=--skip-install
       - UVICORN_ARGS=--host 0.0.0.0
     deploy:
       resources:

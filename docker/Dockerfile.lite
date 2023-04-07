@@ -1,4 +1,4 @@
-FROM nvidia/cuda:11.8.0-runtime-ubuntu20.04 as main
+FROM nvidia/cuda:11.8.0-runtime-ubuntu22.04 as main
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -7,7 +7,7 @@ RUN apt update \
     && add-apt-repository ppa:deadsnakes/ppa -y \
     && apt install curl -y
 
-RUN apt install tensorrt=8.5.3.1-1+cuda11.8 -y
+RUN apt install tensorrt -y
 
 RUN curl -sL https://deb.nodesource.com/setup_18.x | bash
 
@@ -27,8 +27,17 @@ RUN cd  /usr/local/cuda-11.8/targets/x86_64-linux/lib/ \
 
 ENV LD_LIBRARY_PATH /usr/local/cuda-11.8/targets/x86_64-linux/lib:$LD_LIBRARY_PATH
 
-COPY . /app
+RUN /opt/conda/bin/python -m pip install torch --index-url https://download.pytorch.org/whl/cu118
+RUN /opt/conda/bin/python -m pip install fastapi==0.89.1 \
+    uvicorn==0.20.0  tqdm numpy==1.23.1 colored cuda-python==11.8.1 diffusers==0.12.1 ftfy matplotlib onnx==1.12.0 \
+    onnx-graphsurgeon==0.3.25 onnxruntime==1.13.1 polygraphy==0.43.1 scipy transformers==4.24.0 --extra-index-url https://pypi.ngc.nvidia.com \
+    pre-commit tensorrt==8.5.3.1
 
+RUN /opt/conda/bin/python -m pip install accelerate
+RUN curl -O "https://github.com/ddPn08/Lsmith/releases/download/tensorrt-8.5.3.1/libnvinfer_plugin.so"
+
+COPY . /app
+RUN ln -s /libnvinfer_plugin.so /app/lib/trt/lib/libnvinfer_plugin.so
 WORKDIR /app
 
 ENTRYPOINT [ "/opt/conda/bin/python", "-u", "/app/launch.py" ]
