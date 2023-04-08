@@ -175,7 +175,7 @@ class TensorRTDiffusionRunner(BaseRunner):
                 device=self.device,
             ),
         }
-        self.en_vae = self.models["vae"].get_model()
+        #self.en_vae = self.models["vae"].get_model()
 
         for model in self.models.values():
             model.min_latent_shape = self.meta.get("min_latent_resolution", 256) // 8
@@ -283,7 +283,7 @@ class TensorRTDiffusionRunner(BaseRunner):
 
                 if not pre_latents_create_event.skip:
                     latents = prepare_latents(
-                        vae=self.en_vae,
+                        vae=VAE, #self.en_vae,
                         vae_scale_factor=8,
                         unet_in_channels=4,
                         scheduler=self.scheduler,
