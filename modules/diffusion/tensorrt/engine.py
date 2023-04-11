@@ -95,6 +95,7 @@ class EngineBuilder:
                 opts.model_id,
                 hf_token=opts.hf_token,
                 subfolder=opts.subfolder,
+                fp16=opts.fp16,
                 device=self.device,
                 verbose=opts.verbose,
                 max_batch_size=opts.max_batch_size,

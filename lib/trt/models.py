@@ -116,10 +116,10 @@ class Optimizer():
         for node in self.graph.nodes:
             if node.op == "Resize" and len(node.inputs) == 3:
                 name = node.name + "/"
-                
+
                 add_node = node.o().o().i(1)
                 div_node = node.i()
-                
+
                 shape_hw_out = gs.Variable(name=name + "shape_hw_out", dtype=np.int64, shape=[4])
                 shape_hw = gs.Node(op="Shape", name=name+"shape_hw", inputs=[add_node.outputs[0]], outputs=[shape_hw_out])
 

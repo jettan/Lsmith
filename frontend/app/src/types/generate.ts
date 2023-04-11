@@ -1,13 +1,8 @@
 export enum Scheduler {
     'DDIM' = 'ddim',
-    'DEIS' = 'deis',
-    'DPM2' = 'dpm2',
-    'DPM2 A' = 'dpm2-a',
-    'Euler' = 'euler',
-    'Euler A' = 'euler_a',
-    'Heun' = 'heun',
     'DPM++' = 'dpm++',
-    'DPM' = 'dpm',
+    'Euler A' = 'euler_a',
+    'LMSD' = 'lmsd',
     'PNDM' = 'pndm',
 }
 

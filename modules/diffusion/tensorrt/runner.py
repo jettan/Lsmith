@@ -1,4 +1,5 @@
 import gc
+import logging
 import json
 import os
 import random
@@ -22,6 +23,7 @@ from api.generation import (
 )
 from api.generation.image_generation_response import ImageGenerationProgress
 from lib.trt.utilities import TRT_LOGGER, Engine
+from lib.trt.utilities import DPMScheduler, DDIMScheduler, EulerAncestralDiscreteScheduler, LMSDiscreteScheduler, PNDMScheduler
 from modules import utils
 
 from ..runner import BaseRunner
@@ -29,6 +31,10 @@ from . import clip
 from .models import CLIP, VAE, UNet
 from .pwp import TensorRTPromptWeightingPipeline
 
+log_level = os.environ.get('LOG_LEVEL', 'INFO')
+logging.basicConfig(level=getattr(logging, log_level),
+                    format='%(asctime)s %(levelname)s %(message)s')
+logger = logging.getLogger()
 
 def to_image(images):
     images = (
@@ -47,42 +53,6 @@ def to_image(images):
     return result
 
 
-def get_timesteps(
-    scheduler,
-    num_inference_steps: int,
-    strength: float,
-    device: torch.device,
-    is_text2img: bool,
-) -> Tuple[torch.Tensor, int]:
-    if is_text2img:
-        return scheduler.timesteps.to(device), num_inference_steps
-    else:
-        init_timestep = int(num_inference_steps * strength)
-        init_timestep = min(init_timestep, num_inference_steps)
-
-        t_start = max(num_inference_steps - init_timestep, 0)
-        timesteps = scheduler.timesteps[t_start:].to(device)
-        return timesteps, num_inference_steps - t_start
-
-
-schedulers = {
-    "ddim": diffusers.DDIMScheduler,
-    "deis": diffusers.DEISMultistepScheduler,
-    "dpm2": diffusers.KDPM2DiscreteScheduler,
-    "dpm2-a": diffusers.KDPM2AncestralDiscreteScheduler,
-    "euler_a": diffusers.EulerAncestralDiscreteScheduler,
-    "euler": diffusers.EulerDiscreteScheduler,
-    "heun": diffusers.DPMSolverMultistepScheduler,
-    "dpm++": diffusers.DPMSolverMultistepScheduler,
-    "dpm": diffusers.DPMSolverMultistepScheduler,
-    "pndm": diffusers.PNDMScheduler,
-}
-
-
-def get_scheduler(scheduler_id: str):
-    return schedulers[scheduler_id]
-
-
 def preprocess_image(image: Image.Image, height: int, width: int):
     width, height = map(lambda x: x - x % 8, (width, height))
     image = image.resize(
@@ -92,52 +62,6 @@ def preprocess_image(image: Image.Image, height: int, width: int):
     image = image[None].transpose(0, 3, 1, 2)
     image = torch.from_numpy(image)
     return 2.0 * image - 1.0
-
-
-def prepare_latents(
-    vae: VAE,
-    vae_scale_factor: int,
-    unet_in_channels: int,
-    scheduler,
-    image: Optional[Image.Image],
-    timestep,
-    batch_size,
-    height,
-    width,
-    dtype,
-    device,
-    generator,
-    latents=None,
-) -> torch.Tensor:
-    if image is None:
-        shape = (
-            batch_size,
-            unet_in_channels,
-            height // vae_scale_factor,
-            width // vae_scale_factor,
-        )
-
-        if latents is None:
-            latents = torch.randn(
-                shape, generator=generator, device=device, dtype=dtype
-            )
-        else:
-            if latents.shape != shape:
-                raise ValueError(
-                    f"Unexpected latents shape, got {latents.shape}, expected {shape}"
-                )
-            latents = latents.to(device)
-
-        latents = latents * scheduler.init_noise_sigma
-        return latents
-    else:
-        init_latent_dist = vae.encode(image).latent_dist
-        init_latents = init_latent_dist.sample(generator=generator)
-        init_latents = torch.cat([0.18215 * init_latents] * batch_size, dim=0)
-        shape = init_latents.shape
-        noise = torch.randn(shape, generator=generator, device=device, dtype=dtype)
-        latents = scheduler.add_noise(init_latents, noise, timestep)
-        return latents
 
 
 class TensorRTDiffusionRunner(BaseRunner):
@@ -208,9 +132,106 @@ class TensorRTDiffusionRunner(BaseRunner):
         torch.cuda.empty_cache()
         gc.collect()
 
+    def loadResources(self, image_height, image_width, batch_size, seed):
+        self.generator = torch.Generator(device="cuda").manual_seed(seed)
+
+        # Allocate buffers for TensorRT engine bindings
+        for model_name, obj in self.models.items():
+            self.engines[model_name].allocate_buffers(shape_dict=obj.get_shape_dict(batch_size, image_height, image_width), device=self.device)
+
     def run_engine(self, model_name, feed_dict):
         engine = self.engines[model_name]
         return engine.infer(feed_dict, self.stream)
+
+    def get_scheduler(self, scheduler_id: str):
+        sched_opts = {'num_train_timesteps': 1000, 'beta_start': 0.00085, 'beta_end': 0.012}
+        if scheduler_id == "ddim":
+            return DDIMScheduler(device=self.device, **sched_opts)
+        elif scheduler_id == "dpm++":
+            return DPMScheduler(device=self.device, **sched_opts)
+        elif scheduler_id == "euler_a":
+            return EulerAncestralDiscreteScheduler(device=self.device, **sched_opts)
+        elif scheduler_id == "lmsd":
+            return LMSDiscreteScheduler(device=self.device, **sched_opts)
+        elif scheduler_id == "pndm":
+            sched_opts["steps_offset"] = 1
+            return PNDMScheduler(device=self.device, **sched_opts)
+        else:
+            raise ValueError(f"Scheduler should be either ddim, dpm++, euler_a, lmsd or pndm")
+
+    def initialize_latents(self, batch_size, unet_channels, latent_height, latent_width):
+        latents_dtype = torch.float32 # text_embeddings.dtype
+        latents_shape = (batch_size, unet_channels, latent_height, latent_width)
+        latents = torch.randn(latents_shape, device=self.device, dtype=latents_dtype, generator=self.generator)
+
+        # Scale the initial noise by the standard deviation required by the scheduler
+        latents = latents * self.scheduler.init_noise_sigma
+        return latents
+
+    def initialize_timesteps(self, timesteps, strength, is_txt2img):
+        self.scheduler.set_timesteps(timesteps)
+        self.scheduler.configure()
+        if is_txt2img:
+            return self.scheduler.timesteps, timesteps
+        else:
+            offset = self.scheduler.steps_offset if hasattr(self.scheduler, "steps_offset") else 0
+            init_timestep = int(timesteps * strength) + offset
+            init_timestep = min(init_timestep, timesteps)
+            t_start = max(timesteps - init_timestep + offset, 0)
+            timesteps = self.scheduler.timesteps[t_start:].to(self.device)
+            return timesteps, t_start
+
+    def denoise_latent(self, latents, text_embeddings, timesteps=None, step_offset=0, mask=None, masked_image_latents=None):
+        if not isinstance(timesteps, torch.Tensor):
+            timesteps = self.scheduler.timesteps
+
+        for step_index, timestep in enumerate(timesteps):
+            # Expand the latents if we are doing classifier free guidance
+            latent_model_input = torch.cat([latents] * 2)
+            latent_model_input = self.scheduler.scale_model_input(latent_model_input, step_offset + step_index, timestep)
+            if isinstance(mask, torch.Tensor):
+                latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents], dim=1)
+
+            timestep_float = timestep.float() if timestep.dtype != torch.float32 else timestep
+
+            sample_inp = cuda.DeviceView(
+                ptr=latent_model_input.data_ptr(),
+                shape=latent_model_input.shape,
+                dtype=np.float32,
+            )
+            timestep_inp = cuda.DeviceView(
+                ptr=timestep_float.data_ptr(),
+                shape=timestep_float.shape,
+                dtype=np.float32,
+            )
+            embeddings_inp = cuda.DeviceView(
+                ptr=text_embeddings.data_ptr(),
+                shape=text_embeddings.shape,
+                dtype=np.float16 if self.fp16 else np.float32,
+            )
+            noise_pred = self.run_engine(
+                "unet",
+                {
+                    "sample": sample_inp,
+                    "timestep": timestep_inp,
+                    "encoder_hidden_states": embeddings_inp,
+                },
+            )["latent"]
+
+            # Perform guidance
+            noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+            noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
+            latents = self.scheduler.step(noise_pred, latents, step_offset + step_index, timestep)
+
+        latents = 1. / 0.18215 * latents
+        return latents
+
+    def decode_latent(self, latents):
+        sample_inp = cuda.DeviceView(
+            ptr=latents.data_ptr(), shape=latents.shape, dtype=np.float32
+        )
+        images = self.run_engine("vae", {"latent": sample_inp})["images"]
+        return images
 
     def infer(self, opts: ImageGenerationOptions):
         self.wait_loading()
@@ -221,51 +242,36 @@ class TensorRTDiffusionRunner(BaseRunner):
             ).to(device=self.device)
         pre_inference_event = PreInferenceEvent(opts)
         PreInferenceEvent.call_event(pre_inference_event)
-        # TODO: Implement canceling
 
+        self.guidance_scale = opts.scale
+
+        # Set scheduler.
         if self.scheduler_id != opts.scheduler_id:
-            Scheduler = get_scheduler(opts.scheduler_id)
-            try:
-                self.scheduler = Scheduler.from_pretrained(
-                    self.model_id, subfolder="scheduler"
-                )
-            except:
-                self.scheduler = Scheduler.from_config(
-                    {
-                        "num_train_timesteps": 1000,
-                        "beta_start": 0.00085,
-                        "beta_end": 0.012,
-                    }
-                )
+            self.scheduler = self.get_scheduler(opts.scheduler_id)
 
-        self.scheduler.set_timesteps(opts.steps, device=self.device)
-        timesteps, steps = get_timesteps(
-            self.scheduler, opts.steps, opts.strength, self.device, opts.img is None
-        )
+        # Pre-compute latent input scales and linear multistep coefficients
+        timesteps, steps = self.initialize_timesteps(opts.steps, opts.strength, opts.img is None)
         latent_timestep = timesteps[:1].repeat(opts.batch_size * opts.batch_count)
-
-        e2e_tic = time.perf_counter()
 
         results = []
 
         if opts.seed is None or opts.seed == -1:
             opts.seed = random.randrange(0, 4294967294, 1)
 
-        for i in range(opts.batch_count):
-            for model_name, obj in self.models.items():
-                self.engines[model_name].allocate_buffers(
-                    shape_dict=obj.get_shape_dict(
-                        opts.batch_size, opts.image_height, opts.image_width
-                    ),
-                    device=self.device,
-                )
+        torch.cuda.synchronize()
+        e2e_tic = time.perf_counter()
 
+        # Start pipeline
+        for i in range(opts.batch_count):
+            batch_size = 1
             manual_seed = opts.seed + i
-            generator = torch.Generator(device="cuda").manual_seed(manual_seed)
+
+            self.loadResources(opts.image_height, opts.image_width, batch_size, manual_seed)
 
             with torch.inference_mode(), torch.autocast("cuda"), trt.Runtime(
                 TRT_LOGGER
             ):
+                # Text encoder
                 text_embeddings = self.pwp(
                     prompt=opts.prompt,
                     negative_prompt=opts.negative_prompt,
@@ -276,27 +282,29 @@ class TensorRTDiffusionRunner(BaseRunner):
                 if self.fp16:
                     text_embeddings = text_embeddings.to(dtype=torch.float16)
 
+                # Prepare latent space
                 pre_latents_create_event = PreLatentsCreateEvent(opts)
                 PreLatentsCreateEvent.call_event(pre_latents_create_event)
 
                 latents = pre_latents_create_event.latents
 
                 if not pre_latents_create_event.skip:
-                    latents = prepare_latents(
-                        vae=VAE, #self.en_vae,
-                        vae_scale_factor=8,
-                        unet_in_channels=4,
-                        scheduler=self.scheduler,
-                        image=opts.img,
-                        timestep=latent_timestep,
+                    latents = self.initialize_latents(
                         batch_size=opts.batch_size,
-                        height=opts.image_height,
-                        width=opts.image_width,
-                        dtype=torch.float32,
-                        device=self.device,
-                        generator=generator,
+                        unet_channels=4,
+                        latent_height=(opts.image_height // 8),
+                        latent_width=(opts.image_width // 8)
                     )
 
+                # UNET denoiser
+                latents = self.denoise_latent(latents, text_embeddings)
+
+                # Decode latent with VAE.
+                images = self.decode_latent(latents)
+
+                torch.cuda.synchronize()
+
+                # Image metadata.
                 info = ImageInformation(
                     prompt=opts.prompt,
                     negative_prompt=opts.negative_prompt,
@@ -308,89 +316,7 @@ class TensorRTDiffusionRunner(BaseRunner):
                     img2img=opts.img is not None,
                     strength=opts.strength,
                 )
-                torch.cuda.synchronize()
 
-                for ii, timestep in enumerate(tqdm(timesteps)):
-                    if opts.generator:
-                        include = ii % 10 == 0 and len(timesteps) - ii >= 10
-                        if include:
-                            factor = 1.0 / 0.18215 * latents
-                            sample_inp = cuda.DeviceView(
-                                ptr=factor.data_ptr(), shape=factor.shape, dtype=np.float32
-                            )
-                            images = self.run_engine("vae", {"latent": sample_inp})["images"]
-                            size = (opts.image_width // 4, opts.image_height // 4)
-                        yield ImageGenerationProgress(
-                            progress=(i * len(timesteps) + ii) / (opts.batch_count * len(timesteps)),
-                            performance=time.perf_counter() - e2e_tic,
-                            images={utils.img2b64(x.resize(size)) : info for x in to_image(images)} if include else {},
-                        )
-
-                    latent_model_input = torch.cat([latents] * 2)
-                    latent_model_input = self.scheduler.scale_model_input(
-                        latent_model_input, timestep
-                    )
-
-                    if timestep.dtype != torch.float32:
-                        timestep_float = timestep.float()
-                    else:
-                        timestep_float = timestep
-
-                    sample_inp = cuda.DeviceView(
-                        ptr=latent_model_input.data_ptr(),
-                        shape=latent_model_input.shape,
-                        dtype=np.float32,
-                    )
-                    timestep_inp = cuda.DeviceView(
-                        ptr=timestep_float.data_ptr(),
-                        shape=timestep_float.shape,
-                        dtype=np.float32,
-                    )
-                    embeddings_inp = cuda.DeviceView(
-                        ptr=text_embeddings.data_ptr(),
-                        shape=text_embeddings.shape,
-                        dtype=np.float16 if self.fp16 else np.float32,
-                    )
-
-                    noise_pred = self.run_engine(
-                        "unet",
-                        {
-                            "sample": sample_inp,
-                            "timestep": timestep_inp,
-                            "encoder_hidden_states": embeddings_inp,
-                        },
-                    )["latent"]
-
-                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                    noise_pred = noise_pred_uncond + opts.scale * (
-                        noise_pred_text - noise_pred_uncond
-                    )
-
-                    if opts.scheduler_id in [
-                        "deis",
-                        "dpm2",
-                        "heun",
-                        "dpm++",
-                        "dpm",
-                        "pndm",
-                    ]:
-                        latents = self.scheduler.step(
-                            model_output=noise_pred, timestep=timestep, sample=latents
-                        ).prev_sample
-                    else:
-                        latents = self.scheduler.step(
-                            model_output=noise_pred,
-                            timestep=timestep,
-                            sample=latents,
-                            generator=generator,
-                        ).prev_sample
-
-                latents = 1.0 / 0.18215 * latents
-                sample_inp = cuda.DeviceView(
-                    ptr=latents.data_ptr(), shape=latents.shape, dtype=np.float32
-                )
-                images = self.run_engine("vae", {"latent": sample_inp})["images"]
-                torch.cuda.synchronize()
                 if opts.generator:
                     yield ImageGenerationResult(
                         images={utils.img2b64(x) : info for x in to_image(images)},
@@ -406,5 +332,4 @@ class TensorRTDiffusionRunner(BaseRunner):
                 (images, info) = x
                 for img in images:
                     result.images[utils.img2b64(img)] = info
-
             yield result
