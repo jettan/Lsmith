@@ -30,27 +30,13 @@ from ..runner import BaseRunner
 from . import clip
 from .models import CLIP, VAE, UNet
 from .pwp import TensorRTPromptWeightingPipeline
+from .upscaler import Upscaler
 
 log_level = os.environ.get('LOG_LEVEL', 'INFO')
 logging.basicConfig(level=getattr(logging, log_level),
                     format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger()
 
-def to_image(images):
-    images = (
-        ((images + 1) * 255 / 2)
-        .clamp(0, 255)
-        .detach()
-        .permute(0, 2, 3, 1)
-        .round()
-        .type(torch.uint8)
-        .cpu()
-        .numpy()
-    )
-    result = []
-    for i in range(images.shape[0]):
-        result.append(Image.fromarray(images[i]))
-    return result
 
 
 def preprocess_image(image: Image.Image, height: int, width: int):
@@ -74,6 +60,7 @@ class TensorRTDiffusionRunner(BaseRunner):
             txt = f.read()
             self.meta = json.loads(txt)
 
+        self.upscaler = Upscaler()
         self.scheduler = None
         self.scheduler_id = None
         self.model_id = self.meta.get("model_id","CompVis/stable-diffusion-v1-4")
@@ -144,7 +131,11 @@ class TensorRTDiffusionRunner(BaseRunner):
         return engine.infer(feed_dict, self.stream)
 
     def get_scheduler(self, scheduler_id: str):
-        sched_opts = {'num_train_timesteps': 1000, 'beta_start': 0.00085, 'beta_end': 0.012}
+        sched_opts = {
+            'num_train_timesteps': 1000,
+            'beta_start': 0.00085,
+            'beta_end': 0.012
+        }
         if scheduler_id == "ddim":
             return DDIMScheduler(device=self.device, **sched_opts)
         elif scheduler_id == "dpm++":
@@ -233,6 +224,28 @@ class TensorRTDiffusionRunner(BaseRunner):
         images = self.run_engine("vae", {"latent": sample_inp})["images"]
         return images
 
+    def to_image(self, images, upscale=True):
+        images = (
+            ((images + 1) * 255 / 2)
+            .clamp(0, 255)
+            .detach()
+            .permute(0, 2, 3, 1)
+            .round()
+            .type(torch.uint8)
+            .cpu()
+            .numpy()
+        )
+        result = []
+        for i in range(images.shape[0]):
+            image = images[i]
+
+            if upscale:
+                image = self.upscaler.upscale(image)
+
+            image = Image.fromarray(image)
+            result.append(image)
+        return result
+
     def infer(self, opts: ImageGenerationOptions):
         self.wait_loading()
         if opts.img is not None:
@@ -319,11 +332,11 @@ class TensorRTDiffusionRunner(BaseRunner):
 
                 if opts.generator:
                     yield ImageGenerationResult(
-                        images={utils.img2b64(x) : info for x in to_image(images)},
+                        images={utils.img2b64(x) : info for x in self.to_image(images)},
                         performance=time.perf_counter() - e2e_tic,
                     )
                 else:
-                    results.append((to_image(images), info))
+                    results.append((self.to_image(images), info))
         if not opts.generator:
             all_perf_time = time.perf_counter() - e2e_tic
 
