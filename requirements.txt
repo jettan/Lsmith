@@ -22,3 +22,6 @@ transformers==4.24.0
 
 # Pre-commit
 pre-commit
+
+# Upscale support
+realesrgan
