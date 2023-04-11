@@ -38,7 +38,6 @@ logging.basicConfig(level=getattr(logging, log_level),
 logger = logging.getLogger()
 
 
-
 def preprocess_image(image: Image.Image, height: int, width: int):
     width, height = map(lambda x: x - x % 8, (width, height))
     image = image.resize(
@@ -240,7 +239,7 @@ class TensorRTDiffusionRunner(BaseRunner):
             image = images[i]
 
             if upscale:
-                image = self.upscaler.upscale(image)
+                image = self.upscaler.upscale(image, outscale=2)
 
             image = Image.fromarray(image)
             result.append(image)
