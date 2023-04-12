@@ -274,7 +274,7 @@ class TensorRTDiffusionRunner(BaseRunner):
 
         # Start pipeline
         for i in range(opts.batch_count):
-            manual_seed = opts.seed * i
+            manual_seed = opts.seed + i
             self.loadResources(opts.image_height, opts.image_width, opts.batch_size, manual_seed)
 
             with torch.inference_mode(), torch.autocast("cuda"), trt.Runtime(
