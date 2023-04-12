@@ -190,6 +190,7 @@ class TensorRTPromptWeightingPipeline:
         text_input_ids = torch.tensor(
             prompt_tokens, dtype=torch.int32, device=self.device
         )
+        text_input_ids = torch.cat([text_input_ids] * batch_size)
 
         uncond_tokens, uncond_weights = pad_tokens_and_weights(
             uncond_tokens,
@@ -201,6 +202,7 @@ class TensorRTPromptWeightingPipeline:
         uncond_input_ids = torch.tensor(
             uncond_tokens, dtype=torch.int32, device=self.device
         )
+        uncond_input_ids = torch.cat([uncond_input_ids] * batch_size)
 
         text_input_ids_inp = cuda.DeviceView(
             ptr=text_input_ids.data_ptr(), shape=text_input_ids.shape, dtype=np.int32
@@ -210,9 +212,9 @@ class TensorRTPromptWeightingPipeline:
         )["text_embeddings"]
 
         seq_len = text_embeddings.shape[1]
-        text_embeddings = text_embeddings.repeat(1, num_images_per_prompt, 1)
+        text_embeddings = text_embeddings.repeat(1, 1, 1)
         text_embeddings = text_embeddings.view(
-            batch_size * num_images_per_prompt, seq_len, -1
+            1, seq_len, -1
         )
 
         max_length = text_input_ids.shape[-1]
@@ -227,9 +229,9 @@ class TensorRTPromptWeightingPipeline:
         )["text_embeddings"]
 
         seq_len = uncond_embeddings.shape[1]
-        uncond_embeddings = uncond_embeddings.repeat(1, num_images_per_prompt, 1)
+        uncond_embeddings = uncond_embeddings.repeat(1, 1, 1)
         uncond_embeddings = uncond_embeddings.view(
-            batch_size * num_images_per_prompt, seq_len, -1
+            1, seq_len, -1
         )
 
         prompt_weights = torch.tensor(

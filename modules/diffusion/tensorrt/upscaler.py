@@ -57,7 +57,6 @@ class Upscaler:
             gpu_id=0,
         )
 
-        self.model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=6, num_grow_ch=32, scale=4)
 
     def upscale(self, img, outscale=4):
         output, _ = self.upscaler.enhance(img, outscale=outscale)

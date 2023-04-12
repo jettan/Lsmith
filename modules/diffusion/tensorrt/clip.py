@@ -14,7 +14,7 @@ def create_clip_engine():
         model_id,
         device="cuda",
         verbose=False,
-        max_batch_size=1,
+        max_batch_size=16,
     )
     model_dir = os.path.join(config.get("model_dir"), model_id.replace("/", os.sep))
     os.makedirs(model_dir, exist_ok=True)

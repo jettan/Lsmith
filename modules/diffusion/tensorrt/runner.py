@@ -120,7 +120,6 @@ class TensorRTDiffusionRunner(BaseRunner):
 
     def loadResources(self, image_height, image_width, batch_size, seed):
         self.generator = torch.Generator(device="cuda").manual_seed(seed)
-
         # Allocate buffers for TensorRT engine bindings
         for model_name, obj in self.models.items():
             self.engines[model_name].allocate_buffers(shape_dict=obj.get_shape_dict(batch_size, image_height, image_width), device=self.device)
@@ -223,7 +222,7 @@ class TensorRTDiffusionRunner(BaseRunner):
         images = self.run_engine("vae", {"latent": sample_inp})["images"]
         return images
 
-    def to_image(self, images, upscale=True):
+    def to_image(self, images, upscale=False):
         images = (
             ((images + 1) * 255 / 2)
             .clamp(0, 255)
@@ -275,10 +274,8 @@ class TensorRTDiffusionRunner(BaseRunner):
 
         # Start pipeline
         for i in range(opts.batch_count):
-            batch_size = 1
-            manual_seed = opts.seed + i
-
-            self.loadResources(opts.image_height, opts.image_width, batch_size, manual_seed)
+            manual_seed = opts.seed * i
+            self.loadResources(opts.image_height, opts.image_width, opts.batch_size, manual_seed)
 
             with torch.inference_mode(), torch.autocast("cuda"), trt.Runtime(
                 TRT_LOGGER
